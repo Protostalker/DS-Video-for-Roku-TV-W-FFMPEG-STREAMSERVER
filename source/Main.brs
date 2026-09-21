@@ -1,5 +1,5 @@
 sub Main()
-    print "MAIN_START version=1.8.12-summary-refresh-guard"
+    print "MAIN_START version=1.9.3-player-controls"
     screen = CreateObject("roSGScreen")
     m.port = CreateObject("roMessagePort")
     screen.setMessagePort(m.port)

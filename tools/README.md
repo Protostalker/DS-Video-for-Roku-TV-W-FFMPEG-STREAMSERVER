@@ -282,3 +282,8 @@ The live package/config backup created on Hogwarts remains:
 
 Treat that archive as reference/restoration material after SPK/script installs,
 not the first thing to overlay on a clean NAS.
+
+## Stream Server
+
+`tools/streamserver/` holds the optional Docker stream server that remuxes or
+transcodes videos the Roku cannot decode. See `tools/streamserver/README.md`.

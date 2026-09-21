@@ -43,6 +43,9 @@ sub init()
       if action = "movieMetadata" then movieMetadata(req)
       if action = "latestResume" then latestResume(req)
       if action = "getStreamUrl" then getStreamUrl(req)
+      if action = "stopStream" then stopStream(req)
+      if action = "loadSubtitle" then loadSubtitle(req)
+      if action = "checkStreamServer" then checkStreamServer(req)
       if action = "refreshHomeVideoFilenameCache" then refreshHomeVideoFilenameCache(req)
   end sub
 
@@ -2324,6 +2327,14 @@ sub init()
           end if
       end if
 
+      ' ── S: DS Video stream server: probe the file, then direct / remux / transcode.
+      ' If the server is not installed or not reachable this returns false and the
+      ' original behaviour below continues unchanged.
+      print "STREAM_SERVER base=[" + dsvStreamServerBase(baseUrl) + "] path=" + filePath
+      if filePath <> "" and dsvStreamServerBase(baseUrl) <> ""
+          if tryStreamServer(req, baseUrl, sid, token, filePath, fileId, resumePosition, diag) then return
+      end if
+
       ' Try the raw FileStation URL first. Direct MKV works on current Roku
       ' firmware, and this keeps short-title movies like "10" on the direct path.
       if shouldTryFileStationDirectPath(filePath)
@@ -2333,35 +2344,22 @@ sub init()
       end if
 
       if filePath <> ""
-          if shouldTryVideoStationTranscode(filePath)
-              fsPath = fileStationPath(filePath)
+          ' Ladder without the stream server: direct download first (for containers the
+          ' Roku can open), then the Video Station RokuVTE wrapper (HLS transcode).
+          ' Formats the Roku cannot open at all (avi, wmv, ...) go straight to the wrapper.
+          fsPath = fileStationPath(filePath)
+          wrapperAttempt = 0
+          if shouldTryFileStationDirectPath(filePath) then wrapperAttempt = 1
+          if m.targetAttempt = wrapperAttempt
               if fileId <> "" and fileId <> "0"
-                  relaySid = sid
-                  relayToken = token
-                  refreshed = refreshVideoStationSession(baseUrl, req.username, req.password)
-                  if refreshed <> invalid
-                      relaySid = refreshed.sid
-                      relayToken = refreshed.synoToken
-                      print "VTE_RELAY_SESSION refreshed"
-                  else
-                      print "VTE_RELAY_SESSION using existing"
-                  end if
-                  if m.targetAttempt = 0
-                      streamUrl = rokuVteWrapperStreamUrl(baseUrl, relaySid, relayToken, fileId, resumePosition)
-                      print "ROKUVTE_WRAPPER_PLAY "; fsPath; " fileId="; fileId; " resume="; resumePosition
-                      nativeHlsResume = resumePosition > 0
-                      m.top.response = { success: true, streamUrl: streamUrl, streamFormat: "hls", isLive: false, subtitleUrl: fileStationSubtitleUrl(baseUrl, relaySid, relayToken, filePath), debugInfo: "Video Station RokuVTE wrapper " + left(fsPath, 120), directVte: true, nativeHlsResume: nativeHlsResume, resumePosition: resumePosition }
-                      return
-                  end if
-                  m.top.response = { success: false, error: "Video Station wrapper playback failed.", detail: "Path: " + fsPath, attemptIndex: m.targetAttempt }
+                  m.top.response = videoStationWrapperResponse(baseUrl, sid, token, req, filePath, fileId, resumePosition, m.targetAttempt)
               else
                   m.top.response = { success: false, error: "Video Station wrapper needs a file id for this video.", detail: "Path: " + fsPath }
               end if
-              return
           else
-              m.top.response = { success: false, error: "This file needs transcoding. Direct Roku playback is disabled for this container while we stabilize MP4 playback.", detail: "Path: " + fileStationPath(filePath) + chr(10) + "Type: " + mediaType }
-              return
+              m.top.response = { success: false, error: "No more ways to play this file.", detail: "Path: " + fsPath + chr(10) + "Type: " + mediaType + chr(10) + "Tried direct playback and the Video Station wrapper.", attemptIndex: m.targetAttempt }
           end if
+          return
       end if
 
       needsVideoStationTranscode = shouldTryVideoStationTranscode(filePath)
@@ -2491,6 +2489,421 @@ sub init()
           diagStr = diagStr + d + chr(10)
       end for
       m.top.response = { success: false, error: "No more stream candidates", detail: diagStr, attemptIndex: m.targetAttempt, candidatesSeen: m.candidateCount }
+  end sub
+
+  ' ── DS Video stream server ────────────────────────────────────────────────────
+  ' Call one of the stream server's JSON endpoints. Returns an associative array or
+  ' invalid when the server did not answer with JSON.
+  function streamServerCall(server as string, path as string, params as string, timeoutMs as integer) as dynamic
+      url = server + path
+      if params <> "" then url = url + "?" + params
+      raw = httpGetLong(url, timeoutMs)
+      if raw = invalid then return invalid
+      json = parseJSON(raw)
+      if type(json) <> "roAssociativeArray" then return invalid
+      return json
+  end function
+
+  ' When the server is not installed, every play would otherwise wait for the health
+  ' check to time out. Remember a failure for two minutes (Settings > Save clears it).
+  function streamServerRecentlyDown() as boolean
+      reg = createObject("roRegistrySection", "DSVideo")
+      if not reg.exists("streamServerDownAt") then return false
+      downAt = val(reg.read("streamServerDownAt"))
+      dt = createObject("roDateTime")
+      age = dt.asSeconds() - downAt
+      return age >= 0 and age < 120
+  end function
+
+  sub markStreamServerDown(down as boolean)
+      reg = createObject("roRegistrySection", "DSVideo")
+      if down
+          dt = createObject("roDateTime")
+          reg.write("streamServerDownAt", stri(dt.asSeconds()).trim())
+          reg.flush()
+      else if reg.exists("streamServerDownAt")
+          reg.delete("streamServerDownAt")
+          reg.flush()
+      end if
+  end sub
+
+  function streamServerErrorText(reply as dynamic, fallback as string) as string
+      if reply = invalid then return fallback
+      msg = reply.lookUp("error")
+      if msg = invalid then return fallback
+      if type(msg) <> "roString" and type(msg) <> "String" then return fallback
+      return msg
+  end function
+
+  function streamServerNumber(value as dynamic) as float
+      if value = invalid then return 0.0
+      t = type(value)
+      if t = "roInteger" or t = "Integer" or t = "roFloat" or t = "Float" or t = "Double" or t = "roDouble" or t = "LongInteger" or t = "roLongInteger" then return csng(value)
+      return 0.0
+  end function
+
+  ' Ask the stream server how to play this file and answer for the current attempt.
+  ' Attempts run through: direct play (only if the file is fine as it is), remux
+  ' (video copied into HLS), transcode, and finally the Video Station wrapper.
+  ' Returns true when m.top.response was filled in. Returns false when the server is
+  ' not there, so the caller carries on with the original (server-less) behaviour.
+  function tryStreamServer(req as object, baseUrl as string, sid as string, token as string, filePath as string, fileId as string, resumePosition as integer, diag as object) as boolean
+      server = dsvStreamServerBase(baseUrl)
+      if server = "" then return false
+      if m.targetAttempt = 0 and streamServerRecentlyDown()
+          print "STREAM_SERVER skipped, it was unreachable a moment ago"
+          diag.push("stream server skipped (down a moment ago)")
+          return false
+      end if
+
+      health = streamServerCall(server, "/api/health", "", 3000)
+      if health = invalid or health.lookUp("ok") <> true
+          print "STREAM_SERVER unreachable "; server
+          diag.push("stream server not reachable at " + server)
+          markStreamServerDown(true)
+          return false
+      end if
+      markStreamServerDown(false)
+
+      enc = createObject("roUrlTransfer")
+      fsPath = fileStationPath(filePath)
+      common = "path=" + enc.escape(fsPath) + "&sid=" + enc.escape(sid) + "&caps=" + enc.escape(dsvBuildCaps())
+      if token <> "" then common = common + "&token=" + enc.escape(token)
+
+      plan = streamServerCall(server, "/api/plan", common, 25000)
+      if plan = invalid or plan.lookUp("ok") <> true
+          reason = streamServerErrorText(plan, "no answer from the stream server")
+          print "STREAM_SERVER plan failed: "; reason
+          diag.push("stream server plan failed: " + reason)
+          return false
+      end if
+
+      mode = plan.lookUp("mode")
+      canRemux = plan.lookUp("can_remux") = true
+      candidates = []
+      if mode = "direct" then candidates.push("direct")
+      if mode = "remux" or (mode = "direct" and canRemux) then candidates.push("remux")
+      candidates.push("transcode")
+
+      attempt = m.targetAttempt
+      reasons = ""
+      planReasons = plan.lookUp("reasons")
+      if planReasons <> invalid and type(planReasons) = "roArray"
+          for each r in planReasons
+              if type(r) = "roString" or type(r) = "String" then reasons = reasons + r + "; "
+          end for
+      end if
+      print "STREAM_SERVER plan mode="; mode; " attempt="; attempt; " of "; candidates.count(); " reasons="; reasons
+
+      if attempt >= candidates.count()
+          if attempt = candidates.count() and fileId <> "" and fileId <> "0"
+              m.top.response = videoStationWrapperResponse(baseUrl, sid, token, req, filePath, fileId, resumePosition, attempt)
+          else
+              m.top.response = { success: false, error: "No more ways to play this file.", detail: "Path: " + fsPath + chr(10) + "Tried: " + streamServerJoin(candidates) + chr(10) + reasons, attemptIndex: attempt }
+          end if
+          return true
+      end if
+
+      choice = candidates[attempt]
+
+      ' A chosen audio track or a burned-in subtitle cannot be served by direct play or,
+      ' for burn-in, a plain copy of the video.
+      audioIndex = req.lookUp("audioIndex")
+      burnIndex = req.lookUp("burnIndex")
+      if burnIndex <> invalid
+          choice = "transcode"
+      else if audioIndex <> invalid and choice = "direct"
+          choice = "transcode"
+          if canRemux then choice = "remux"
+      end if
+      label = "Stream server " + choice + " (" + mode + ") " + left(fsPath, 80)
+
+      if choice = "direct"
+          response = { success: true, streamUrl: fileStationStreamUrl(baseUrl, sid, token, filePath), streamFormat: streamFormatForPath(filePath), debugInfo: label + chr(10) + reasons, attemptIndex: attempt, startupTimeout: 40 }
+          subtitleUrl = fileStationSubtitleUrl(baseUrl, sid, token, filePath)
+          if subtitleUrl <> "" then response.addReplace("subtitleUrl", subtitleUrl)
+          m.top.response = response
+          return true
+      end if
+
+      startParams = common + "&mode=" + choice + "&start=" + stri(resumePosition).trim() + "&nosub=1"
+      if audioIndex <> invalid then startParams = startParams + "&audio=" + stri(audioIndex).trim()
+      if burnIndex <> invalid then startParams = startParams + "&burn=" + stri(burnIndex).trim()
+
+      started = streamServerCall(server, "/api/start", startParams, 40000)
+      if started = invalid or started.lookUp("ok") <> true
+          reason = streamServerErrorText(started, "the stream server did not start the stream")
+          print "STREAM_SERVER start failed: "; reason
+          m.top.response = { success: false, retryable: true, error: "Stream server: " + reason, detail: label, attemptIndex: attempt }
+          return true
+      end if
+
+      offset = int(streamServerNumber(started.lookUp("offset")))
+      sidecars = listSidecarSubtitles(baseUrl, sid, token, filePath)
+      options = buildSubtitleOptions(started.lookUp("subs"), sidecars)
+      m.top.response = {
+          success: true,
+          streamUrl: server + started.lookUp("url"),
+          streamFormat: "hls",
+          isLive: false,
+          subtitleUrl: "",
+          debugInfo: label + chr(10) + reasons,
+          attemptIndex: attempt,
+          nativeHlsResume: true,
+          resumePosition: offset,
+          serverBase: server,
+          serverSession: started.lookUp("session"),
+          serverMode: choice,
+          totalDuration: streamServerNumber(started.lookUp("duration")),
+          startupTimeout: 75,
+          customUi: true,
+          subtitleOptions: options,
+          audioOptions: buildAudioOptions(started.lookUp("audio")),
+          activeAudio: started.lookUp("audio_index"),
+          defaultSubtitle: started.lookUp("default_subtitle"),
+          subtitleContext: { serverBase: server, path: fsPath, sid: sid, token: token }
+      }
+      return true
+  end function
+
+  ' ── Subtitle and audio track lists for the player's menu ───────────────────────
+  function languageName(code as dynamic) as string
+      if code = invalid then return ""
+      if type(code) <> "roString" and type(code) <> "String" then return ""
+      c = lcase(code)
+      names = { eng: "English", en: "English", jpn: "Japanese", ja: "Japanese", spa: "Spanish", es: "Spanish", fre: "French", fra: "French", fr: "French", ger: "German", deu: "German", de: "German", ita: "Italian", it: "Italian", por: "Portuguese", pt: "Portuguese", rus: "Russian", ru: "Russian", kor: "Korean", ko: "Korean", chi: "Chinese", zho: "Chinese", zh: "Chinese", ara: "Arabic", ar: "Arabic", hin: "Hindi", hi: "Hindi", dut: "Dutch", nld: "Dutch", swe: "Swedish", pol: "Polish", tur: "Turkish", arm: "Armenian", hye: "Armenian", heb: "Hebrew", vie: "Vietnamese", tha: "Thai", ind: "Indonesian", nor: "Norwegian", dan: "Danish", fin: "Finnish", gre: "Greek", ell: "Greek", cze: "Czech", ces: "Czech", hun: "Hungarian", rum: "Romanian", ron: "Romanian", ukr: "Ukrainian", und: "" }
+      if names.doesExist(c) then return names[c]
+      return ucase(code)
+  end function
+
+  function trackText(track as object, kindWord as string) as string
+      base = languageName(track.lookUp("lang"))
+      title = track.lookUp("title")
+      if base = "" then base = kindWord + " " + idToStr(track.lookUp("index"))
+      if title <> invalid and (type(title) = "roString" or type(title) = "String") and title <> "" then base = base + " - " + title
+      return base
+  end function
+
+  function buildSubtitleOptions(subs as dynamic, sidecars as object) as object
+      options = []
+      for each sc in sidecars
+          options.push({ id: "f:" + sc.path, kind: "file", path: sc.path, index: -1, label: "File: " + sc.name })
+      end for
+      if subs <> invalid and type(subs) = "roArray"
+          for each t in subs
+              codec = t.lookUp("codec")
+              if codec = invalid then codec = ""
+              idx = int(streamServerNumber(t.lookUp("index")))
+              if t.lookUp("text") = true
+                  options.push({ id: "e:" + stri(idx).trim(), kind: "embedded", path: "", index: idx, label: trackText(t, "Track") + " (" + codec + ")", forced: t.lookUp("forced") = true })
+              else
+                  options.push({ id: "b:" + stri(idx).trim(), kind: "burn", path: "", index: idx, label: trackText(t, "Track") + " (picture, burned in)", forced: t.lookUp("forced") = true })
+              end if
+          end for
+      end if
+      return options
+  end function
+
+  function buildAudioOptions(audio as dynamic) as object
+      options = []
+      if audio <> invalid and type(audio) = "roArray"
+          for each t in audio
+              idx = int(streamServerNumber(t.lookUp("index")))
+              codec = t.lookUp("codec")
+              if codec = invalid then codec = ""
+              ch = int(streamServerNumber(t.lookUp("channels")))
+              options.push({ index: idx, label: trackText(t, "Audio") + " (" + codec + " " + stri(ch).trim() + "ch)" })
+          end for
+      end if
+      return options
+  end function
+
+  ' Subtitle files next to the video: "<video name>.<anything>.srt|vtt|ass|ssa".
+  function listSidecarSubtitles(baseUrl as string, sid as string, token as string, filePath as string) as object
+      found = []
+      dirPath = parentPath(filePath)
+      if dirPath = "" then return found
+      videoBase = lcase(fileNameNoExt(filePath))
+      result = httpGet(fileStationListUrl(baseUrl, sid, token, fileStationPath(dirPath), "file"))
+      if result = invalid then return found
+      json = parseJSON(result)
+      if json = invalid or json.success <> true or json.data = invalid then return found
+      files = json.data.lookUp("files")
+      if files = invalid then return found
+      exts = [".srt", ".vtt", ".ass", ".ssa"]
+      for each f in files
+          fname = f.lookUp("name")
+          fpath = f.lookUp("path")
+          if fname <> invalid and fpath <> invalid
+              lowerName = lcase(fname)
+              if left(lowerName, len(videoBase) + 1) = videoBase + "."
+                  isSub = false
+                  for each e in exts
+                      if right(lowerName, len(e)) = e then isSub = true
+                  end for
+                  if isSub
+                      prio = sidecarNamePriority(fname, fileNameNoExt(filePath))
+                      if prio = 0 then prio = 50
+                      found.push({ path: fpath, name: fname, prio: prio })
+                  end if
+              end if
+          end if
+      end for
+      ' best match first
+      n = found.count()
+      for i = 0 to n - 2
+          for j = 0 to n - 2 - i
+              if found[j].prio > found[j + 1].prio
+                  tmp = found[j]
+                  found[j] = found[j + 1]
+                  found[j + 1] = tmp
+              end if
+          end for
+      end for
+      return found
+  end function
+
+  ' Fetch one subtitle track from the stream server and turn it into cues the player draws.
+  sub loadSubtitle(req as object)
+      server = req.lookUp("serverBase")
+      if server = invalid or server = ""
+          m.top.response = { success: false, error: "no stream server", seq: req.lookUp("seq") }
+          return
+      end if
+      enc = createObject("roUrlTransfer")
+      params = "path=" + enc.escape(req.path) + "&sid=" + enc.escape(req.sid)
+      token = req.lookUp("token")
+      if token <> invalid and token <> "" then params = params + "&token=" + enc.escape(token)
+      sidecar = req.lookUp("sidecar")
+      if sidecar <> invalid and sidecar <> ""
+          params = params + "&sidecar=" + enc.escape(sidecar)
+      else
+          params = params + "&index=" + stri(req.index).trim()
+      end if
+      started = streamServerCall(server, "/api/sub", params, 20000)
+      if started = invalid or started.lookUp("ok") <> true
+          m.top.response = { success: false, error: streamServerErrorText(started, "could not start subtitle extraction"), seq: req.lookUp("seq") }
+          return
+      end if
+      ' The server answers once the whole track has been read out of the video file.
+      body = httpGetLong(server + started.lookUp("url"), 130000)
+      if body = invalid
+          m.top.response = { success: false, error: "subtitle download failed", seq: req.lookUp("seq") }
+          return
+      end if
+      cues = parseSrtCues(body)
+      print "SUBTITLE_LOADED cues="; cues.count()
+      m.top.response = { success: true, cues: cues, optionId: req.lookUp("optionId"), seq: req.lookUp("seq") }
+  end sub
+
+  function srtTimeToSeconds(text as string) as float
+      t = text.trim()
+      t = t.replace(",", ".")
+      parts = []
+      for each p in t.tokenize(":")
+          parts.push(p)
+      end for
+      if parts.count() < 3 then return -1.0
+      return val(parts[0]) * 3600 + val(parts[1]) * 60 + val(parts[2])
+  end function
+
+  function parseSrtCues(raw as string) as object
+      cues = []
+      tagStrip = createObject("roRegex", "<[^>]*>|\{[^}]*\}", "")
+      text = raw.replace(chr(13), "")
+      cur = invalid
+      for each line in text.split(chr(10))
+          arrow = instr(1, line, "-->")
+          if arrow > 0
+              if cur <> invalid and cur.t <> "" then cues.push(cur)
+              startText = left(line, arrow - 1)
+              endText = mid(line, arrow + 3).trim()
+              sp = instr(1, endText, " ")
+              if sp > 0 then endText = left(endText, sp - 1)
+              s = srtTimeToSeconds(startText)
+              e = srtTimeToSeconds(endText)
+              if s >= 0 and e >= s
+                  cur = { s: s, e: e, t: "" }
+              else
+                  cur = invalid
+              end if
+          else if cur <> invalid
+              trimmed = line.trim()
+              if trimmed = ""
+                  if cur.t <> "" then cues.push(cur)
+                  cur = invalid
+              else
+                  clean = tagStrip.replaceAll(trimmed, "")
+                  clean = clean.replace("\N", chr(10))
+                  if clean <> ""
+                      if cur.t <> "" then cur.t = cur.t + chr(10)
+                      cur.t = cur.t + clean
+                  end if
+              end if
+          end if
+      end for
+      if cur <> invalid and cur.t <> "" then cues.push(cur)
+      return cues
+  end function
+
+  function streamServerJoin(items as object) as string
+      out = ""
+      for each item in items
+          if out <> "" then out = out + ", "
+          out = out + item
+      end for
+      return out
+  end function
+
+  ' Last resort: Video Station's own RokuVTE wrapper (needs Video Station's transcoder).
+  function videoStationWrapperResponse(baseUrl as string, sid as string, token as string, req as object, filePath as string, fileId as string, resumePosition as integer, attempt as integer) as object
+      fsPath = fileStationPath(filePath)
+      relaySid = sid
+      relayToken = token
+      refreshed = refreshVideoStationSession(baseUrl, req.username, req.password)
+      if refreshed <> invalid
+          relaySid = refreshed.sid
+          relayToken = refreshed.synoToken
+          print "VTE_RELAY_SESSION refreshed"
+      else
+          print "VTE_RELAY_SESSION using existing"
+      end if
+      streamUrl = rokuVteWrapperStreamUrl(baseUrl, relaySid, relayToken, fileId, resumePosition)
+      print "ROKUVTE_WRAPPER_PLAY "; fsPath; " fileId="; fileId; " resume="; resumePosition
+      return { success: true, streamUrl: streamUrl, streamFormat: "hls", isLive: false, subtitleUrl: fileStationSubtitleUrl(baseUrl, relaySid, relayToken, filePath), debugInfo: "Video Station RokuVTE wrapper " + left(fsPath, 120), directVte: true, nativeHlsResume: resumePosition > 0, resumePosition: resumePosition, attemptIndex: attempt, startupTimeout: 60 }
+  end function
+
+  ' Tell the stream server the viewer left, so it stops encoding straight away.
+  sub stopStream(req as object)
+      server = req.lookUp("serverBase")
+      session = req.lookUp("serverSession")
+      if server = invalid or session = invalid or server = "" or session = "" then return
+      enc = createObject("roUrlTransfer")
+      streamServerCall(server, "/api/stop", "session=" + enc.escape(session), 4000)
+      m.top.response = { success: true }
+  end sub
+
+  ' Settings screen: is the stream server there?
+  sub checkStreamServer(req as object)
+      server = dsvStreamServerBase(req.baseUrl)
+      if server = ""
+          m.top.response = { success: true, enabled: false, message: "Stream server is turned off." }
+          return
+      end if
+      markStreamServerDown(false)
+      health = streamServerCall(server, "/api/health", "", 6000)
+      if health = invalid or health.lookUp("ok") <> true
+          m.top.response = { success: true, enabled: true, reachable: false, server: server, message: "Stream server not reachable at " + server + ". Video will play without it." }
+          return
+      end if
+      msg = "Stream server OK at " + server
+      dsm = health.lookUp("dsm")
+      if dsm <> invalid and type(dsm) = "roAssociativeArray" and dsm.lookUp("reachable") = false
+          msg = "Stream server found at " + server + " but it cannot reach DSM. Check its DSM address."
+          m.top.response = { success: true, enabled: true, reachable: true, dsmOk: false, server: server, message: msg }
+          return
+      end if
+      m.top.response = { success: true, enabled: true, reachable: true, dsmOk: true, server: server, message: msg }
   end sub
 
   ' ── Helpers ───────────────────────────────────────────────────────────────────

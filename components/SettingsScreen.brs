@@ -4,6 +4,7 @@ sub init()
     m.useHttps = true
     m.username = ""
     m.password = ""
+    m.streamServer = ""
     m.activeField = ""
     m.focusIndex = 0
     m.focusArea = "settings"
@@ -13,7 +14,7 @@ sub init()
     m.pendingKeyboardRefocusPasses = 0
     m.pendingKeyboardReturnToNav = false
     m.categories = []
-    m.rowYs = [190, 290, 390, 490, 590, 740]
+    m.rowYs = [190, 290, 390, 490, 590, 690, 820]
     m.top.focusable = true
 
     nav = m.top.findNode("categoryList")
@@ -38,6 +39,7 @@ sub loadSavedCredentials()
     if reg.exists("useHttps") then m.useHttps = (reg.read("useHttps") = "true")
     if reg.exists("username") then m.username = readProtectedSetting(reg, "username")
     if reg.exists("password") then m.password = readProtectedSetting(reg, "password")
+    if reg.exists("streamServer") then m.streamServer = reg.read("streamServer")
 end sub
 
 sub saveCredentials()
@@ -51,6 +53,12 @@ sub saveCredentials()
     end if
     writeProtectedSetting(reg, "username", m.username)
     writeProtectedSetting(reg, "password", m.password)
+    if m.streamServer = ""
+        if reg.exists("streamServer") then reg.delete("streamServer")
+    else
+        reg.write("streamServer", m.streamServer)
+    end if
+    if reg.exists("streamServerDownAt") then reg.delete("streamServerDownAt")
     reg.flush()
 end sub
 
@@ -71,6 +79,14 @@ sub updateAllValues()
         m.top.findNode("row4value").text = "(not set)"
     else
         m.top.findNode("row4value").text = "********"
+    end if
+    lowered = lcase(m.streamServer)
+    if m.streamServer = ""
+        m.top.findNode("row5value").text = "Automatic (NAS address, port 8899)"
+    else if lowered = "off" or lowered = "none" or lowered = "disabled"
+        m.top.findNode("row5value").text = "Off"
+    else
+        m.top.findNode("row5value").text = m.streamServer
     end if
 end sub
 
@@ -161,7 +177,7 @@ sub setHighlight(idx as integer)
     m.top.findNode("rowHighlight").translation = [580, m.rowYs[idx]]
     updateFocusBox(idx)
     setFocusBoxVisible(true)
-    if idx = 5
+    if idx = 6
         m.top.findNode("rowHighlight").color = "#6E737A"
     else
         m.top.findNode("rowHighlight").color = "#5F6670"
@@ -229,7 +245,7 @@ function onKeyEvent(key as string, press as boolean) as boolean
             enterFieldRows()
             return true
         end if
-        if m.focusIndex < 5 then setHighlight(m.focusIndex + 1)
+        if m.focusIndex < 6 then setHighlight(m.focusIndex + 1)
         return true
     else if key = "up"
         if m.fieldRowsActive = true and m.focusIndex = 0
@@ -366,10 +382,38 @@ sub activateRow(idx as integer)
         m.activeField = "password"
         showKeyboard("Password", "")
     else if idx = 5
+        m.activeField = "streamServer"
+        showKeyboard("Stream Server (blank = automatic, off = disable)", m.streamServer)
+    else if idx = 6
         saveCredentials()
         showStatus("", false)
+        checkStreamServerStatus()
         returnToNav()
     end if
+end sub
+
+' After saving, look for the stream server and say what was found.
+sub checkStreamServerStatus()
+    if m.nasAddress = "" then return
+    scheme = "http://"
+    if m.useHttps then scheme = "https://"
+    task = createObject("roSGNode", "APITask")
+    task.request = { action: "checkStreamServer", baseUrl: scheme + m.nasAddress + ":" + m.nasPort }
+    task.observeField("response", "onStreamServerChecked")
+    task.control = "RUN"
+    m.streamCheckTask = task
+    showStatus("Checking for the stream server...", false)
+end sub
+
+sub onStreamServerChecked(event as object)
+    response = event.getData()
+    if response = invalid then return
+    msg = ""
+    if response.message <> invalid then msg = response.message
+    isProblem = false
+    if response.reachable = false then isProblem = true
+    if response.dsmOk = false then isProblem = true
+    showStatus(msg, isProblem)
 end sub
 
 sub showKeyboard(title as string, currentText as string)
@@ -401,6 +445,8 @@ sub onKeyboardDone(event as object)
             if entered <> "" then m.username = entered
         else if m.activeField = "password"
             m.password = entered
+        else if m.activeField = "streamServer"
+            m.streamServer = trimSetting(entered)
         end if
         updateAllValues()
     end if
@@ -412,7 +458,7 @@ end sub
 
 sub queueKeyboardFocusRestore(rowIndex as integer)
     if rowIndex < 0 then rowIndex = 0
-    if rowIndex > 5 then rowIndex = 5
+    if rowIndex > 6 then rowIndex = 6
     m.pendingKeyboardFocus = rowIndex
     m.pendingKeyboardRefocusPasses = 2
     timer = m.top.findNode("keyboardFocusTimer")
@@ -470,7 +516,7 @@ end sub
 
 sub restoreKeyboardFocus(rowIndex as integer)
     if rowIndex < 0 then rowIndex = 0
-    if rowIndex > 5 then rowIndex = 5
+    if rowIndex > 6 then rowIndex = 6
     m.focusArea = "settings"
     m.top.findNode("rowHighlight").visible = true
     setHighlight(rowIndex)
@@ -488,3 +534,10 @@ sub showStatus(msg as string, isError as boolean)
         lbl.color = "#44AAFF"
     end if
 end sub
+
+function trimSetting(value as dynamic) as string
+    if value = invalid then return ""
+    if type(value) <> "roString" and type(value) <> "String" then return ""
+    text = value
+    return text.trim()
+end function

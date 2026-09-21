@@ -1,0 +1,29 @@
+# DS Video stream server.
+#
+# Container Manager (GUI):  Project > Create > pick this folder > it finds this file > Next > Done.
+# SSH:                       sudo docker compose up -d --build     (or use install-on-nas.sh)
+#
+# "host" networking is deliberate: it lets the container reach DSM on 127.0.0.1
+# without any address setup, and the Roku reaches the server on the NAS's own
+# IP address on port 8899. No port mappings to get wrong.
+version: "3.8"
+
+services:
+  streamserver:
+    build: .
+    image: ds-video-stream:latest
+    container_name: ds-video-stream
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # Where DSM listens ON THE NAS ITSELF. Change only if you moved DSM off port 5000.
+      # HTTPS example: https://127.0.0.1:5001
+      DSM_URL: "http://127.0.0.1:5000"
+      # Port the Roku app talks to. The app assumes 8899 unless you change it in its Settings.
+      PORT: "8899"
+      # Use "vaapi" to turn on Intel hardware encoding (also needs docker-compose.vaapi.yml).
+      HWACCEL: "none"
+      # 1080p output quality/size cap in kbit/s when video has to be re-encoded.
+      MAX_VIDEO_KBPS: "8000"
+    volumes:
+      - ./cache:/cache

@@ -1,193 +1,194 @@
-# Synology DS Video for Roku
+# Synology DS Video for Roku, with a stream server
 
-A Roku channel for browsing and playing Synology Video Station libraries, plus a
-new DS Video restore kit for DSM builds where Synology removed Video Station,
-DS video, and built-in transcoding support.
+A Roku channel for browsing and playing your Synology Video Station library, plus an
+optional helper that runs on the NAS and converts anything the Roku cannot play, such as
+HEVC video with E-AC3 audio in an MKV.
 
-## What This Build Includes
+This is a fork of [sapman1208/DS-Video-for-Roku-TV](https://github.com/sapman1208/DS-Video-for-Roku-TV).
+The channel itself (library browsing, artwork, ratings, watch status, resume, the
+Video Station restore kit) is that project's work. This fork adds the stream server,
+format detection and a custom player.
 
-- Roku channel source for Synology Video Station browsing and playback.
-- Patched RokuVTE wrapper for Video Station streaming.
-- Cross-platform restore-kit downloader for Synology SPKs.
-- NAS-side restore script with safety guards so installed Video Station packages
-  are not reinstalled or downgraded unless explicitly forced.
+## What was added
 
-The old external NAS helper tools are no longer part of this build.
+- **Stream server** (`tools/streamserver`): a small Python and ffmpeg service in Docker
+  (Synology Container Manager). It repackages (remux) or re-encodes (transcode) a video and
+  hands the Roku an HLS stream. It does not use Video Station's transcoder or any Synology
+  codec license.
+- **Format detection**: the channel asks the Roku what it can decode and picks the lightest
+  way that works:
+  1. direct play,
+  2. remux (video copied untouched, audio converted),
+  3. transcode (H.264 with AAC or AC3),
+  4. Video Station's RokuVTE wrapper as a last resort.
 
-## Roku Installation
+  If a step does not start within a time limit, the app moves to the next one on its own.
+  Without the server the app still works, using steps 1 and 4 only.
+- **Custom player** for server streams, since the Roku's own controls cannot scrub a stream
+  that is still being prepared: a progress bar with the real position and length, pause,
+  skip, and a menu for subtitle and audio tracks.
+- **Subtitles**: text tracks and subtitle files next to the video are drawn by the app and
+  switched on automatically. Picture subtitles (PGS, DVD) are burned into the video.
 
-Package this channel from the repository root:
+## Setup guide
 
-```sh
-zip -r /tmp/roku-ds-video.zip manifest source components images -x '*.DS_Store'
-```
+Two parts: put the stream server on the NAS (10 minutes), then put the channel on the Roku
+(5 minutes). You need a Synology NAS with Video Station data, a Roku, and a Windows, Mac or
+Linux computer on the same network.
 
-Open the Roku developer installer:
+### What you need first
 
-```text
-http://ROKU_IP_ADDRESS/plugin_install
-```
+- A Synology NAS running DSM 7 with **Container Manager** installed (Package Center; it is
+  called "Docker" on DSM 7.1 and older). The NAS needs internet access once, to download
+  ffmpeg while the server is built.
+- A DSM account that is an **administrator** (needed for SSH and `sudo`).
+- The Roku and the NAS on the same network, and a Roku with developer mode (see Part 2).
+- This repository as a folder on your computer: on GitHub click **Code, Download ZIP**, then
+  unzip it.
 
-Upload `/tmp/roku-ds-video.zip`, install it, then launch the development
-channel.
+### Part 1: install the stream server on the NAS
 
-You can also install with curl:
+1. **Turn on SSH.** DSM, Control Panel, Terminal & SNMP, tick **Enable SSH service**, Apply.
+2. **Copy the server files to the NAS.** Open File Station. Inside the shared folder
+   `docker` (Container Manager creates it; create it if it is missing) make a folder called
+   `ds-video-stream`. Upload the **contents** of the repository's `tools/streamserver`
+   folder into it, so that these files sit directly inside `ds-video-stream`:
+   `Dockerfile`, `streamserver.py`, `planner.py`, `docker-compose.yml`,
+   `docker-compose.vaapi.yml`, `install-on-nas.sh`. On the NAS that folder is
+   `/volume1/docker/ds-video-stream`. Use a name without spaces.
+3. **Connect over SSH.** On your computer open a terminal (Windows: PowerShell) and type,
+   using your own DSM username and NAS address:
 
-```sh
-curl --digest -u rokudev:YOUR_ROKU_DEV_PASSWORD \
-  -F 'mysubmit=Install' \
-  -F 'archive=@/tmp/roku-ds-video.zip' \
-  -F 'passwd=' \
-  http://ROKU_IP_ADDRESS/plugin_install
-```
+   ```sh
+   ssh yourusername@192.168.1.50
+   ```
 
-## First App Login
+   Answer `yes` if it asks about a fingerprint, then type your DSM password. Nothing shows
+   while you type it, which is normal.
+4. **Run the installer.**
 
-On first launch, enter:
+   ```sh
+   cd /volume1/docker/ds-video-stream
+   sudo sh install-on-nas.sh
+   ```
 
-- NAS address: hostname or IP only, such as `nas.example.com` or `10.0.1.74`.
-- Port: your DSM port. Use `5001` for normal DSM HTTPS, or `5000` for DSM HTTP.
-- Protocol: HTTP or HTTPS.
-- Username and password: Synology account with Video Station access.
+   Type your password again if `sudo` asks. The first run takes a few minutes while it
+   builds. It finishes with a line saying the server is running and healthy. If something
+   is wrong it says what in plain words (for example that Container Manager is missing).
+5. **Check it.** In a browser on your computer open `http://<NAS address>:8899/api/health`.
+   You should see `"ok": true` and, under `dsm`, `"reachable": true`.
+6. **Firewall.** If the DSM firewall is on (Control Panel, Security, Firewall), allow TCP
+   port `8899` from your home network.
 
-Credentials are saved on the Roku. Use `Settings` from the top navigation bar to
-edit them.
+Prefer no typing? In Container Manager go to **Project, Create**, pick the
+`ds-video-stream` folder, keep "Use existing docker-compose.yml", click Next until Done. The
+result is the same. Details and other options are in
+[tools/streamserver/README.md](tools/streamserver/README.md).
 
-## Build A Restore Kit
+The server starts again by itself after a NAS reboot.
 
-The new restore-kit tooling lives in:
+### Part 2: install the channel on the Roku
 
-```text
-tools/
-```
+1. **Turn on developer mode.** With the Roku remote press: Home three times, Up twice,
+   Right, Left, Right, Left, Right. Note the IP address it shows, accept the agreement, set
+   a developer password and let the Roku restart.
+2. **Build the channel zip.** From the repository folder on your computer, zip these four
+   items together: the `manifest` file and the `source`, `components` and `images` folders.
+   The zip must have `manifest` at its top level, not inside another folder. On Mac or
+   Linux, run this in the repository folder:
 
-## NAS `wget` Install
+   ```sh
+   zip -r roku-ds-video.zip manifest source components images -x '*.DS_Store'
+   ```
 
-The easiest restore-kit install is from an SSH session on the NAS:
+   On Windows, select those four items, right-click, Send to, Compressed (zipped) folder.
+3. **Upload it.** In a browser go to `http://<ROKU_IP>/`, sign in as user `rokudev` with
+   your developer password, click **Upload**, choose the zip, then **Install**. The channel
+   starts on its own. Later, it is in your channel list as **Synology DS Video**.
+4. **Sign in inside the channel.** Enter:
+   - NAS address: hostname or IP only, such as `nas.example.com` or `192.168.1.50`.
+   - Port: your DSM port (`5001` for HTTPS, `5000` for HTTP) and the matching protocol.
+   - A DSM username and password that can use Video Station.
+5. **Check the server link.** Open **Settings** in the channel, leave "Stream Server" blank
+   (it finds `http://<NAS address>:8899` on its own) and press **Save**. It says "Stream
+   server OK" or tells you what is wrong.
 
-```sh
-cd /tmp
-wget -O ds-video-install.sh "https://raw.githubusercontent.com/sapman1208/DS-Video-for-Roku-TV/main/install.sh"
-sh ds-video-install.sh
-```
+### Part 3: try it
 
-That downloads the GitHub `main` branch, installs the restore-kit tools into
-`/tmp/ds-video-restore-kit`, downloads the Synology SPKs for the NAS
-architecture, and runs the restore.
+Play a file that used to fail, such as an HEVC video with E-AC3 audio in an MKV. It may
+sit on the loading screen for up to about a minute the first time while the server
+prepares it. Subtitles come on by themselves if the video has any.
 
-To prepare the restore-kit without running it:
+### If you watch away from home
 
-```sh
-sh ds-video-install.sh --no-run
-```
+Forward TCP port `8899` on your router to the NAS and use your DDNS name as the NAS address
+in the channel. Read the note about encryption under "Known limits" first.
 
-After restore, open Package Center, open Advanced Media Extensions / CodecPack,
-and sign in/install the codec entitlement before testing AVI, HEVC, AVC, or
-other transcoded playback.
+### Updating and removing
 
-`/tmp` is fine for a one-time install. Copy `/tmp/ds-video-restore-kit` to a
-persistent shared folder afterward if you want to keep a local NAS backup.
+- **Update the server:** copy the new files over the old ones in `ds-video-stream` and run
+  `sudo sh install-on-nas.sh` again. It is safe to repeat.
+- **Update the channel:** build a new zip and upload it the same way; it replaces the old one.
+- **Check on the server:** `sudo sh install-on-nas.sh --status` and `--logs`.
+- **Remove the server:** `sudo sh install-on-nas.sh --uninstall`.
 
-From macOS, Linux, Windows, or a NAS with Python 3, build a downloadable restore
-kit from Synology's package archive:
+### When something goes wrong
 
-```sh
-python3 tools/build-ds-video-restore-kit.py --output ds-video-restore-kit-download --include-optional
-```
+| What you see | Likely cause and fix |
+| --- | --- |
+| Settings says the server is not reachable | Container not running, firewall blocking port 8899, or the port differs from Settings. Run `sudo sh install-on-nas.sh --status`. |
+| Health page says `"reachable": false` under `dsm` | DSM is not on port 5000. Change `DSM_URL` in `docker-compose.yml` and run the installer again. |
+| Installer says Docker was not found or not running | Install or open Container Manager in Package Center, then run it again. |
+| Build fails | The NAS could not download packages. Check its internet access and DNS. |
+| Black screen while playing | Run `sudo docker logs -f --tail 50 ds-video-stream` and press play; see the troubleshooting list in the server README. |
+| Roku on the internet path cannot connect | Port 8899 is not forwarded on the router. |
+| The app ignores the server for two minutes after a failure | Press Save in Settings to retry at once. |
 
-If Python reports a local certificate verification error while downloading from
-Synology's archive, rerun the same command with `--insecure`.
+## Player controls (server streams)
 
-Build every architecture Synology publishes for the tested packages:
+| Key | Action |
+| --- | --- |
+| OK or Play | Pause and resume |
+| Left / Right | Back / forward 10 seconds |
+| Rewind / Fast forward | Back / forward 60 seconds |
+| Up | Show the progress bar |
+| Down or `*` | Menu: subtitle track, audio track, automatic subtitles on or off |
+| Back | Stop |
 
-```sh
-python3 tools/build-ds-video-restore-kit.py --output ds-video-restore-kit-all-arch --all-architectures --include-optional
-```
+Skipping within what the server has already prepared is instant. Skipping further starts a
+new stream at that point, which takes a few seconds.
 
-Build one explicit architecture:
+## Known limits
 
-```sh
-python3 tools/build-ds-video-restore-kit.py --output ds-video-restore-kit-rtd1296 --arch rtd1296
-```
+- **The connection is not encrypted by default.** The stream server speaks plain HTTP and
+  the app sends your Synology session to it. On a home network that is usually fine. If you
+  expose the port to the internet, put it behind an HTTPS reverse proxy (DSM: Control Panel,
+  Login Portal, Reverse Proxy) and enter the `https://` address in `Settings > Stream Server`.
+- Picture-subtitle burn-in, Intel GPU encoding (`HWACCEL=vaapi`) and HDR tone-mapping are
+  experimental and have had little or no testing on real hardware.
+- A re-encoded 1080p stream needs a NAS CPU that can keep up. Files that only need remuxing
+  are far lighter.
+- Seeking far ahead in a re-encoded stream restarts it at that point.
+- Tested on one Roku and one Synology NAS. The server logic has automated tests
+  (`python3 -m unittest test_streamserver` in `tools/streamserver`, with ffmpeg installed).
 
-The downloader writes:
+## Restore kit for DSM 7.2.2 and newer
 
-```text
-ds-video-restore-kit-download/restore-kit
-ds-video-restore-kit-download/restore-kit/packages/<arch>
-ds-video-restore-kit-download.zip
-ds-video-restore-kit-download.tar.gz
-```
+Synology removed Video Station from recent DSM builds. `tools/` also holds the original
+project's restore kit that reinstalls Video Station and the patched RokuVTE wrapper. It is
+documented in [tools/README.md](tools/README.md). It wraps the script
+`tools/Video_Station_for_DSM_722-1.4.22` by Dave Russell (MIT, see its `UPSTREAM.md`).
 
-Copy the generated `restore-kit` folder to the NAS. `/tmp/ds-video-restore-kit`
-works for a one-time install:
-
-```text
-/tmp/ds-video-restore-kit
-```
-
-## Fresh NAS Restore
-
-Run this as root on the NAS or VM:
-
-```sh
-LOG="/tmp/ds-video-restore-kit-$(date +%Y%m%d-%H%M%S).log" /bin/sh /tmp/ds-video-restore-kit/ds-video-restore-kit.sh --debug
-```
-
-If DSM uses custom login ports, pass them on the same command:
-
-```sh
-LOG="/tmp/ds-video-restore-kit-$(date +%Y%m%d-%H%M%S).log" /bin/sh /tmp/ds-video-restore-kit/ds-video-restore-kit.sh --dsm-http-port=5000 --dsm-https-port=5001 --debug
-```
-
-If no port flags are typed, the defaults are standard DSM ports: HTTP `5000`
-and HTTPS `5001`.
-
-The combined restore command runs:
-
-1. Saved 007revad Video Station restore script.
-2. Patched RokuVTE wrapper install.
-3. Package status and debug diagnostics.
-
-Safety guard: if Video Station is already installed, the script skips the
-package-restore phase so it does not reinstall or downgrade your existing
-package. To intentionally reinstall the Synology packages:
-
-```sh
-/bin/sh /tmp/ds-video-restore-kit/ds-video-restore-kit.sh --force-722-install --debug
-```
-
-## Codec Sign-In
-
-After the restore, open Package Center and open Advanced Media Extensions /
-CodecPack. Sign in with your Synology account and install/activate the codec
-entitlement before testing AVI, HEVC, AVC, or other transcoded playback.
-
-In VM testing, AVI browser playback spun until AME was signed in, then played
-correctly.
-
-## Verification
-
-After restore, verify:
-
-```sh
-synopkg status CodecPack
-synopkg status VideoStation
-synopkg status MediaServer
-ls -l /var/packages/VideoStation/target/ui/webapi/rokuvte.*
-```
-
-Expected RokuVTE files:
-
-```text
-rokuvte.cgi
-rokuvte.py
-```
-
-## More Restore-Kit Details
-
-See the detailed tool README:
+## Repository layout
 
 ```text
-tools/README.md
+manifest, source/, components/, images/   the Roku channel
+tools/streamserver/                       stream server (Docker) and its tests
+tools/rokuvte/                            RokuVTE wrapper for Video Station
+tools/ds-video-restore-kit.sh, build-ds-video-restore-kit.py, install.sh   restore kit
 ```
+
+## Credits
+
+Original channel and restore kit: sapman1208. Video Station restore script: Dave Russell
+(007revad). Stream server, format detection and custom player: added in this fork.

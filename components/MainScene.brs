@@ -388,6 +388,7 @@ sub init()
       end if
       player.observeField("playbackResult", "onPlaybackDone")
       player.observeField("playbackStarted", "onPlaybackStarted")
+      player.observeField("stopServerStream", "onStopServerStream")
       m.top.appendChild(player)
       player.setFocus(true)
       m.screenStack.push(player)
@@ -395,6 +396,22 @@ sub init()
       if videoData <> invalid and videoData.lookUp("type") = "episode" and videoData.lookUp("autoplayEpisodes") = invalid
           m.pendingAutoplayContextVideo = videoData
       end if
+  end sub
+
+  ' The player asks for its stream server session to be closed. The request is run from
+  ' here so it is not cut short when the player screen is removed.
+  sub onStopServerStream(event as object)
+      if event = invalid then return
+      info = event.getData()
+      if info = invalid then return
+      if m.stopStreamTasks = invalid then m.stopStreamTasks = []
+      task = createObject("roSGNode", "APITask")
+      task.request = { action: "stopStream", serverBase: info.lookUp("serverBase"), serverSession: info.lookUp("serverSession") }
+      task.control = "RUN"
+      m.stopStreamTasks.push(task)
+      while m.stopStreamTasks.count() > 4
+          m.stopStreamTasks.shift()
+      end while
   end sub
 
   sub onPlaybackStarted(event as object)

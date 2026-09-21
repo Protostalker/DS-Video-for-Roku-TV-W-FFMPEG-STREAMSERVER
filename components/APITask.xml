@@ -6,4 +6,5 @@
     </interface>
     <script type="text/brightscript" uri="pkg:/components/APITask.brs" />
     <script type="text/brightscript" uri="pkg:/source/bslib.brs" />
+    <script type="text/brightscript" uri="pkg:/source/StreamCaps.brs" />
 </component>

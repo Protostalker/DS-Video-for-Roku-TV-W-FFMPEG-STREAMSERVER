@@ -1,0 +1,13 @@
+# OPTIONAL: Intel hardware video encoding (Quick Sync) for NAS models with an Intel CPU.
+# Use it together with the main file:
+#     sudo docker compose -f docker-compose.yml -f docker-compose.vaapi.yml up -d --build
+# (install-on-nas.sh does this for you automatically when /dev/dri exists.)
+# If the GPU turns out not to work the server falls back to software encoding by itself.
+version: "3.8"
+
+services:
+  streamserver:
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      HWACCEL: "vaapi"
