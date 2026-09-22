@@ -545,16 +545,12 @@ def build_hls_command(opts: HlsOptions, url: str, media: MediaInfo, plan: Plan,
     if hw:
         cmd += ["-hwaccel", "vaapi", "-hwaccel_device", opts.vaapi_device,
                 "-hwaccel_output_format", "vaapi"]
-    if burn and v is not None and v.width and v.height:
-        # A bitmap subtitle stream (PGS/DVD) is turned into video frames by ffmpeg's
-        # "sub2video" bridge before it can be overlaid, and that bridge allocates its own
-        # canvas sized to the subtitle track's own metadata -- often a small, standard
-        # size (e.g. 720x576) that is smaller than the real video. A caption positioned
-        # low in the frame (as most are, and doubly so for a two-line one) then gets
-        # clipped to that canvas before the overlay filter ever runs, so scaling the
-        # already-clipped result afterwards cannot bring the missing line back. Telling
-        # ffmpeg the real video size up front avoids the clipping in the first place.
-        cmd += ["-canvas_size", "%dx%d" % (v.width, v.height)]
+    # NOTE: deliberately no -canvas_size here. Verified on real hardware that it does NOT
+    # help -- for a properly-muxed PGS track (the common case; ffprobe reports its native
+    # size, and it already matches the video) forcing a different explicit canvas size
+    # breaks sub2video's rendering outright rather than fixing anything, producing no
+    # subtitle at all. Leave the canvas on ffmpeg's own default (match the video) unless a
+    # real re-muxed-with-wrong-metadata case shows up with hard evidence, not just theory.
     cmd += ["-fflags", "+genpts"]
     cmd += http_input_options(url, opts)
     if start > 0:
@@ -602,8 +598,12 @@ def build_hls_command(opts: HlsOptions, url: str, media: MediaInfo, plan: Plan,
                     # upscaled sources). Overlaying it 1:1 without matching that up can push
                     # part of a multi-line subtitle below the visible frame. scale2ref fits
                     # the subtitle image to the video's real size before compositing it.
+                    # scale2ref's w/h expressions see the REFERENCE (second) input's size as
+                    # main_w/main_h, not "iw2/ih2" -- that was never a real scale2ref variable,
+                    # so ffmpeg rejected the whole filter graph at startup (exit code 234,
+                    # "Undefined constant ... in 'iw2'") every single time burn-in was used.
                     sub_ref = "[0:s:%d]" % (burn_stream_pos or 0)
-                    fc = ("%s[0:%d]scale2ref=w=iw2:h=ih2[subs][vref];"
+                    fc = ("%s[0:%d]scale2ref=w=main_w:h=main_h[subs][vref];"
                           "[vref][subs]overlay[ov];[ov]%s[v]") % (sub_ref, v.index, ",".join(chain))
                     cmd += ["-filter_complex", fc, "-map", "[v]"]
                 else:

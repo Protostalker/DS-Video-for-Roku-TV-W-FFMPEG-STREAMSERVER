@@ -364,6 +364,10 @@ sub init()
   end sub
 
   sub playVideo(videoData as object)
+      if shouldPromptFileChoice(videoData)
+          showFileChoicePrompt(videoData)
+          return
+      end if
       resumePosition = savedResumePosition(videoData)
       if shouldRefreshResumePosition(videoData)
           startResumeRefresh(videoData)
@@ -473,6 +477,99 @@ sub init()
       end if
       playVideo(videoData)
   end sub
+
+  ' Mirrors Synology's own "There are more than one video. Please select one to continue."
+  ' dialog: some library entries (an episode, a movie) are matched to more than one physical
+  ' file -- a bonus/commentary file alongside the real one, or a straight duplicate -- and
+  ' the listing screens always just grabbed the first file Synology handed back. That's how
+  ' a show's "Episode 1" could silently play a bonus clip instead. Ask instead of guessing,
+  ' same as Synology's own player does, the one time there's an actual choice to make.
+  function shouldPromptFileChoice(videoData as object) as boolean
+      if videoData = invalid then return false
+      if videoData.lookUp("fileChoiceDone") = true then return false
+      candidates = videoData.lookUp("fileCandidates")
+      if candidates = invalid then return false
+      return candidates.count() > 1
+  end function
+
+  sub showFileChoicePrompt(videoData as object)
+      candidates = videoData.fileCandidates
+      buttons = []
+      for each c in candidates
+          label = c.name
+          meta = fileChoiceMetaText(c)
+          if meta <> "" then label = label + "  (" + meta + ")"
+          buttons.push(label)
+      end for
+      buttons.push("Cancel")
+
+      dialog = createObject("roSGNode", "Dialog")
+      dialog.title = "There are more than one video"
+      dialog.message = "Please select one to continue."
+      dialog.buttons = buttons
+      dialog.observeField("buttonSelected", "onFileChoiceDialogSelected")
+      m.pendingFileChoiceVideo = videoData
+      m.top.dialog = dialog
+  end sub
+
+  sub onFileChoiceDialogSelected(event as object)
+      idx = event.getData()
+      videoData = m.pendingFileChoiceVideo
+      m.pendingFileChoiceVideo = invalid
+      m.top.dialog = invalid
+      if videoData = invalid then return
+      candidates = videoData.fileCandidates
+      if idx >= 0 and idx < candidates.count()
+          chosen = candidates[idx]
+          print "FILE_CHOICE picked="; chosen.name
+          videoData.addReplace("fileId", chosen.id)
+          videoData.addReplace("filePath", chosen.path)
+          videoData.addReplace("fileChoiceDone", true)
+          playVideo(videoData)
+      else
+          print "FILE_CHOICE cancelled"
+      end if
+  end sub
+
+  function fileChoiceMetaText(candidate as object) as string
+      parts = []
+      duration = 0
+      if candidate.durationSeconds <> invalid then duration = candidate.durationSeconds
+      if duration > 0
+          h = duration \ 3600
+          m2 = (duration mod 3600) \ 60
+          s = duration mod 60
+          if h > 0
+              parts.push(stri(h).trim() + ":" + rightZero(m2) + ":" + rightZero(s))
+          else
+              parts.push(stri(m2).trim() + ":" + rightZero(s))
+          end if
+      end if
+      size = 0
+      if candidate.sizeBytes <> invalid then size = candidate.sizeBytes
+      if size > 0
+          mb = size / 1000000.0
+          parts.push(formatOneDecimal(mb) + " MB")
+      end if
+      text = ""
+      for each p in parts
+          if text = "" then text = p else text = text + ", " + p
+      end for
+      return text
+  end function
+
+  function rightZero(n as integer) as string
+      s = stri(n).trim()
+      if len(s) < 2 then s = "0" + s
+      return s
+  end function
+
+  function formatOneDecimal(n as float) as string
+      scaled = int(n * 10 + 0.5)
+      whole = scaled \ 10
+      tenth = scaled mod 10
+      return stri(whole).trim() + "." + stri(tenth).trim()
+  end function
 
   sub showResumePrompt(videoData as object, position as integer)
       dialog = createObject("roSGNode", "Dialog")

@@ -868,6 +868,52 @@ sub init()
       m.watchStatusInFlight = false
       print "WATCH_STATUS_FINISHED position="; position; " duration="; duration
       syncWatchStatus(position)
+      syncVideoWatchedFlag(true)
+  end sub
+
+  ' Separate from syncWatchStatus() on purpose: "updateWatchStatus" (SYNO.VideoStation.WatchStatus/
+  ' setinfo) only ever posts a playback POSITION -- it's the resume-tracking API, not the "watched"
+  ' checkbox. Synology's own Video Station UI (and the read side of our own episode list) key off a
+  ' separate watched flag that only the "set_watched" API sets. That call already existed correctly
+  ' as setVideoWatched() in APITask.brs but nothing ever dispatched the "setVideoWatched" action, so
+  ' an episode watched all the way through the Roku streamer never actually got marked watched
+  ' anywhere -- not in our app's list, not even in Synology's native web UI.
+  sub syncVideoWatchedFlag(watched as boolean)
+      if m.watchedFlagInFlight = true then return
+      videoData = m.top.videoData
+      if videoData = invalid then return
+      authData = videoData.authData
+      if authData = invalid then authData = m.top.authData
+      if authData = invalid then return
+
+      m.watchedFlagInFlight = true
+      task = createObject("roSGNode", "APITask")
+      task.request = {
+          action: "setVideoWatched",
+          baseUrl: authData.baseUrl,
+          proxyBaseUrl: authData.proxyBaseUrl,
+          sid: authData.sid,
+          synoToken: authData.synoToken,
+          videoId: videoData.id,
+          videoType: videoData.type,
+          watched: watched
+      }
+      task.observeField("response", "onWatchedFlagSynced")
+      task.control = "RUN"
+      m.watchedFlagTask = task
+  end sub
+
+  sub onWatchedFlagSynced(event as object)
+      if event = invalid then return
+      m.watchedFlagInFlight = false
+      response = event.getData()
+      if response = invalid then return
+      if response.success = true
+          print "WATCH_FLAG_SYNC ok watched="; response.watched
+      else if response.error <> invalid
+          print "WATCH_FLAG_SYNC error="; response.error
+          if response.detail <> invalid then print "WATCH_FLAG_SYNC detail="; response.detail
+      end if
   end sub
 
   sub syncWatchStatus(position as integer)
@@ -1223,8 +1269,11 @@ sub init()
       end if
   end sub
 
-  ' The video only has picture subtitles (PGS, DVD). They cannot be drawn as text, so when the
-  ' stream is being re-encoded anyway, restart it once with the best picture track burned in.
+  ' The video only has picture subtitles (PGS, DVD), which can't be drawn as text. "Show
+  ' subtitles automatically" means subtitles on, full stop -- including burned-in ones -- so
+  ' this restarts the stream with the best picture track burned in, same as picking it from
+  ' the menu by hand. If that fails, it fails visibly (the normal stream-retry/error path
+  ' handles it) instead of being quietly skipped -- silently avoiding it just hid a real bug.
   sub autoBurnSubtitle()
       if m.serverMode <> "transcode" or m.burnIndex <> invalid then return
       pick = invalid

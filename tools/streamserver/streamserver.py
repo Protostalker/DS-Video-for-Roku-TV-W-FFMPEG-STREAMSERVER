@@ -333,7 +333,7 @@ class Session:
             log.info("session %s: %s (video=%s audio=%s%s) start=%ds", self.id[:8], self.plan.mode,
                      self.plan.video_action, self.plan.audio_action,
                      ", vaapi" if self.used_hw else "", self.start)
-            log.debug("session %s command: %s", self.id[:8], " ".join(_scrub(c) for c in cmd))
+            log.info("session %s command: %s", self.id[:8], " ".join(_scrub(c) for c in cmd))
             if self.logf:
                 self.logf.close()
             self.logf = open(os.path.join(self.dir, "ffmpeg.log"), "wb")
@@ -394,6 +394,10 @@ class Session:
                         self.launch(use_hw=False)
                         return
                     log.info("session %s: ffmpeg exited rc=%s", self.id[:8], rc)
+                    if rc != 0:
+                        detail = self.failure_detail()
+                        if detail:
+                            log.warning("session %s: ffmpeg stderr tail: %s", self.id[:8], detail)
                 return
             ahead = self.count_segments() - (self.max_served + 1)
             if not self.paused and ahead >= self.lookahead_segments:
@@ -704,6 +708,45 @@ class App:
             raise ApiError(400, "invalid session")
         return {"ok": True, "stopped": self.sessions.stop(sess_id)}
 
+    def api_debug_snapshot(self, params: Dict[str, str]) -> bytes:
+        """Diagnostic only: grab one still frame at ``t`` seconds, through the same
+        overlay/burn filter graph a real stream would use, so a burn-in problem can be seen
+        directly instead of guessed at from logs. Not used by the Roku app."""
+        path, sid, token = self._auth(params)
+        media = self.prober.probe(path, sid, token)
+        v = media.video
+        if v is None:
+            raise ApiError(400, "no video stream")
+        burn = _opt_int(params.get("burn"))
+        burn_pos = None
+        if burn is not None:
+            for pos, sub in enumerate(media.subs):
+                if sub.index == burn:
+                    burn_pos = pos
+            if burn_pos is None:
+                raise ApiError(400, "burn must be the index of a subtitle stream on this file")
+        start = max(0, _int(params.get("t"), 30))
+        url = self.dsm.file_url(path, sid, token)
+        cmd = [self.hls_opts.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "warning"]
+        cmd += planner.http_input_options(url, self.hls_opts)
+        cmd += ["-ss", str(start), "-i", url]
+        if burn_pos is not None:
+            fc = ("[0:s:%d][0:%d]scale2ref=w=main_w:h=main_h[subs][vref];"
+                  "[vref][subs]overlay[ov]") % (burn_pos, v.index)
+            cmd += ["-filter_complex", fc, "-map", "[ov]"]
+        else:
+            cmd += ["-map", "0:%d" % v.index]
+        cmd += ["-frames:v", "1", "-update", "1", "-f", "image2", "-vcodec", "png", "-"]
+        log.info("debug_snapshot command: %s", " ".join(_scrub(c) for c in cmd))
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        except subprocess.TimeoutExpired:
+            raise ApiError(504, "snapshot timed out")
+        if res.returncode != 0 or not res.stdout:
+            err = _scrub(res.stderr.decode("utf-8", "replace").strip()[-600:])
+            raise ApiError(502, "snapshot failed (rc=%s): %s" % (res.returncode, err))
+        return res.stdout
+
 
 def _opt_int(value) -> Optional[int]:
     if value in (None, "", "-1"):
@@ -772,6 +815,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(200, app.api_stop(params), head)
             elif path == "/api/sub":
                 self._json(200, app.api_sub(params), head)
+            elif path == "/api/debug_snapshot":
+                self._send(200, "image/png", app.api_debug_snapshot(params), head)
             else:
                 m = re.fullmatch(r"/s/([0-9a-f]{32})/([A-Za-z0-9_.\-]+)", path)
                 s = re.fullmatch(r"/sub/([0-9a-f]{32})\.srt", path)

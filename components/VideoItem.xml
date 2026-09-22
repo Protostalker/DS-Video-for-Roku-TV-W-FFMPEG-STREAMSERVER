@@ -15,5 +15,7 @@
         <Label id="dateLabel" text="" color="#8BAFD1" font="font:TinySystemFont" translation="[0, 0]" width="220" visible="false" />
         <Rectangle id="watchedBadge" color="#1DB954" width="30" height="30" translation="[0, 0]" visible="false" />
         <Label id="watchedCheck" text="✓" color="#FFFFFF" font="font:SmallBoldSystemFont" horizAlign="center" vertAlign="center" width="30" height="30" translation="[0, 0]" visible="false" />
+        <Rectangle id="progressTrack" color="#00000099" width="220" height="6" translation="[0, 0]" visible="false" />
+        <Rectangle id="progressFill" color="#0070CC" width="0" height="6" translation="[0, 0]" visible="false" />
     </children>
 </component>

@@ -45,6 +45,13 @@ sub onContentSet(event as object)
     m.top.findNode("watchedBadge").visible = watched
     m.top.findNode("watchedCheck").visible = watched
     positionWatchedBadge()
+
+    ' In-progress bar along the bottom edge of the poster: only for a partially-watched
+    ' title (some resume position saved, but not enough to count as watched yet). A fully
+    ' watched title gets the checkmark badge above instead, not both.
+    m.watchRatio = 0
+    if content.watchRatio <> invalid then m.watchRatio = content.watchRatio
+    positionProgressBar()
 end sub
 
 ' The badge sits in the poster's own top-right corner, and the poster's size changes
@@ -56,6 +63,33 @@ sub positionWatchedBadge()
     y = 6
     m.top.findNode("watchedBadge").translation = [x, y]
     m.top.findNode("watchedCheck").translation = [x, y]
+end sub
+
+' Bar sits flush with the poster's own bottom edge, which (like the badge above) moves
+' with the layout mode, so it's positioned/sized here rather than fixed in the XML.
+sub positionProgressBar()
+    poster = m.top.findNode("poster")
+    track = m.top.findNode("progressTrack")
+    fill = m.top.findNode("progressFill")
+    watched = false
+    if m.content <> invalid then watched = m.content.watched = true
+    ratio = 0
+    if m.watchRatio <> invalid then ratio = m.watchRatio
+
+    height = 6
+    y = poster.height - height
+    track.translation = [0, y]
+    fill.translation = [0, y]
+    track.width = poster.width
+
+    if not watched and ratio > 0
+        track.visible = true
+        fill.visible = true
+        fill.width = int(poster.width * ratio / 100)
+    else
+        track.visible = false
+        fill.visible = false
+    end if
 end sub
 
 sub onPosterLoadStatus(event as object)

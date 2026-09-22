@@ -37,6 +37,22 @@ sub onContentSet(event as object)
     watched = content.watched = true
     m.top.findNode("watchedBadge").visible = watched
     m.top.findNode("watchedCheck").visible = watched
+
+    ' In-progress bar along the bottom edge of the poster: only for a partially-watched
+    ' episode (some resume position saved, but not enough to count as watched yet). A
+    ' fully-watched episode gets the checkmark badge above instead, not both.
+    ratio = 0
+    if content.watchRatio <> invalid then ratio = content.watchRatio
+    track = m.top.findNode("progressTrack")
+    fill = m.top.findNode("progressFill")
+    if not watched and ratio > 0
+        track.visible = true
+        fill.visible = true
+        fill.width = int(520 * ratio / 100)
+    else
+        track.visible = false
+        fill.visible = false
+    end if
 end sub
 
 sub onPosterLoadStatus(event as object)

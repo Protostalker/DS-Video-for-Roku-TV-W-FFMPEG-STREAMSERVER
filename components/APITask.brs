@@ -2114,6 +2114,46 @@ sub init()
       return false
   end function
 
+  ' Every file Synology attached to an item (not just the first) -- an episode/movie slot
+  ' can legitimately have more than one physical file (a bonus/commentary clip alongside the
+  ' real one, or a straight duplicate), which is exactly what Synology's own "There are more
+  ' than one video" picker is for. Anything that reduces an item down to a single file before
+  ' the episode list even reaches the grid throws that choice away for good.
+  function allFileCandidatesFromItem(item as object) as object
+      list = []
+      additional = item.lookUp("additional")
+      if additional <> invalid
+          list = appendFileCandidateEntries(additional.lookUp("file"), list)
+      end if
+      list = appendFileCandidateEntries(item.lookUp("file"), list)
+      return list
+  end function
+
+  function appendFileCandidateEntries(fileList as dynamic, list as object) as object
+      if fileList = invalid or type(fileList) <> "roArray" then return list
+      for each f in fileList
+          if f <> invalid and type(f) = "roAssociativeArray"
+              id = f.lookUp("id")
+              path = f.lookUp("path")
+              if id <> invalid and path <> invalid and path <> ""
+                  already = false
+                  for each existing in list
+                      if existing.path = path then already = true
+                  end for
+                  if not already
+                      entry = { id: id, path: path }
+                      duration = f.lookUp("duration")
+                      if duration <> invalid then entry.duration = duration
+                      size = f.lookUp("size")
+                      if size <> invalid then entry.size = size
+                      list.push(entry)
+                  end if
+              end if
+          end if
+      end for
+      return list
+  end function
+
   function itemFileInfo(item as object) as object
       info = { id: invalid, path: "" }
 
@@ -4774,11 +4814,40 @@ sub init()
           end while
           if existingIdx < 0
               unique.push(item)
-          else if episodeItemScore(item) > episodeItemScore(unique[existingIdx])
-              unique[existingIdx] = item
+          else
+              ' Same season/episode slot matched to two separate raw entries (rather than one
+              ' entry already carrying multiple files) -- e.g. an extra/commentary file that
+              ' Synology's own filename parsing numbered the same as the real episode. Keep
+              ' whichever scores higher as the one the grid shows, but carry BOTH files' worth
+              ' of candidates forward so the loser doesn't just vanish and take its file with it.
+              combinedFiles = combineFileCandidates(unique[existingIdx], item)
+              if episodeItemScore(item) > episodeItemScore(unique[existingIdx])
+                  winner = item
+              else
+                  winner = unique[existingIdx]
+              end if
+              if combinedFiles.count() > 0
+                  mergedAdditional = winner.lookUp("additional")
+                  if mergedAdditional = invalid then mergedAdditional = {}
+                  mergedAdditional.addReplace("file", combinedFiles)
+                  winner.addReplace("additional", mergedAdditional)
+              end if
+              unique[existingIdx] = winner
           end if
       end for
       return unique
+  end function
+
+  function combineFileCandidates(a as object, b as object) as object
+      combined = allFileCandidatesFromItem(a)
+      for each entry in allFileCandidatesFromItem(b)
+          already = false
+          for each existing in combined
+              if existing.path = entry.path then already = true
+          end for
+          if not already then combined.push(entry)
+      end for
+      return combined
   end function
 
   function episodeItemScore(item as object) as integer
@@ -4836,11 +4905,15 @@ sub init()
                   item.addReplace("summary", summary)
                   item.addReplace("description", summary)
               end if
-              fallbackFile = itemFileInfo(playable)
-              if fallbackFile.path <> ""
+              ' Keep every file the playable item had, not just the first -- copying "additional"
+              ' from the metadata item above can otherwise leave only whichever single file the
+              ' metadata source happened to carry (or none at all), silently dropping the rest
+              ' of a multi-file match (e.g. a real episode plus a bonus/extra file) down to one.
+              fallbackFiles = allFileCandidatesFromItem(playable)
+              if fallbackFiles.count() > 0
                   mergedAdditional = item.lookUp("additional")
                   if mergedAdditional = invalid then mergedAdditional = {}
-                  mergedAdditional.addReplace("file", [ { id: fallbackFile.id, path: fallbackFile.path } ])
+                  mergedAdditional.addReplace("file", fallbackFiles)
                   item.addReplace("additional", mergedAdditional)
               end if
               merged.push(item)

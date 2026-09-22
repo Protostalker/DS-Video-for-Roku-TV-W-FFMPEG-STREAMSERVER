@@ -105,6 +105,14 @@ sub init()
       return ratioPercent >= 90
   end function
 
+  ' For the in-progress bar on the grid tile -- Synology's ratio is sometimes missing/negative
+  ' or (rarely) a hair over 100, neither of which should ever be handed to the UI as a raw width.
+  function clampRatio(ratioPercent as integer) as integer
+      if ratioPercent < 0 then return 0
+      if ratioPercent > 100 then return 100
+      return ratioPercent
+  end function
+
   function fileInfoFromItem(item as object) as object
       info = { id: invalid, path: "", watched: invalid }
 
@@ -131,6 +139,60 @@ sub init()
       end if
 
       return info
+  end function
+
+  ' Same file list Synology itself prompts over ("There are more than one video. Please
+  ' select one to continue.") -- a movie/home-video entry can be matched to more than one
+  ' physical file (an extra/commentary track alongside the real feature, or a straight
+  ' duplicate). fileInfoFromItem() above always just grabs the first one, which is how a
+  ' title can end up silently playing its own bonus content instead. This collects every
+  ' file Synology attached to the item so the caller can offer a choice instead of guessing.
+  function fileCandidatesFromItem(item as object) as object
+      list = []
+      additional = item.lookUp("additional")
+      if additional <> invalid
+          list = fileCandidateEntries(additional.lookUp("file"), list)
+      end if
+      list = fileCandidateEntries(item.lookUp("file"), list)
+      return list
+  end function
+
+  function fileCandidateEntries(fileList as dynamic, list as object) as object
+      if fileList = invalid or type(fileList) <> "roArray" then return list
+      for each f in fileList
+          if f <> invalid and type(f) = "roAssociativeArray"
+              id = f.lookUp("id")
+              path = f.lookUp("path")
+              if id <> invalid and path <> invalid and path <> ""
+                  already = false
+                  for each existing in list
+                      if existing.path = path then already = true
+                  end for
+                  if not already
+                      list.push({
+                          id: id,
+                          path: path,
+                          name: baseNameKeepExt(path),
+                          durationSeconds: numberForDetail(f, ["duration"]),
+                          sizeBytes: numberForDetail(f, ["size"])
+                      })
+                  end if
+              end if
+          end if
+      end for
+      return list
+  end function
+
+  function baseNameKeepExt(path as string) as string
+      name = path
+      lastSlash = 0
+      idx = 1
+      while idx <= len(path)
+          if mid(path, idx, 1) = "/" then lastSlash = idx
+          idx = idx + 1
+      end while
+      if lastSlash > 0 then name = mid(path, lastSlash + 1)
+      return name
   end function
 
   function hasPlaylistEpisodeFields(item as object) as boolean
@@ -547,7 +609,7 @@ sub init()
           if category = "movies" or category = "homevideos" or category = "tvrecordings"
               fileInfo = fileInfoFromItem(item)
               ratio = numberForDetail(item, ["watched_ratio", "watchedRatio"])
-              node.addFields({ watched: mediaIsWatched(fileInfo.watched, ratio) })
+              node.addFields({ watched: mediaIsWatched(fileInfo.watched, ratio), watchRatio: clampRatio(ratio) })
           end if
           idx = idx + 1
       end for
@@ -633,7 +695,7 @@ sub init()
       node.addFields({ layoutMode: layoutMode, playlistIndex: idx })
       fileInfo = fileInfoFromItem(item)
       ratio = numberForDetail(item, ["watched_ratio", "watchedRatio"])
-      node.addFields({ watched: mediaIsWatched(fileInfo.watched, ratio) })
+      node.addFields({ watched: mediaIsWatched(fileInfo.watched, ratio), watchRatio: clampRatio(ratio) })
       if layoutMode = "playlistWide" or layoutMode = "playlistHomeVideo"
           dateText = playlistItemDate(item)
           if dateText <> "" then node.addFields({ playlistDate: dateText })
@@ -1394,6 +1456,7 @@ sub init()
 	              episodeMeta: episodeMetaForDetail,
 	              sourceListKey: sourceListKey,
 		              sourceItemKey: sourceItemKey,
+		              fileCandidates: fileCandidatesFromItem(item),
 		              authData: authData
 		          }
               print "DETAIL_HANDOFF type="; itemType; " category="; categoryLabel(category); " title="; safeStr(item, ["title", "name", "file_name"]); " posterSource="; posterSource(item, authData, category); " backdropSource="; backdropSource(item, authData)
