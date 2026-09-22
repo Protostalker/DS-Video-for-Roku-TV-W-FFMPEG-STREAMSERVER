@@ -40,6 +40,22 @@ sub onContentSet(event as object)
     else
         m.top.findNode("yearLabel").text = ""
     end if
+
+    watched = content.watched = true
+    m.top.findNode("watchedBadge").visible = watched
+    m.top.findNode("watchedCheck").visible = watched
+    positionWatchedBadge()
+end sub
+
+' The badge sits in the poster's own top-right corner, and the poster's size changes
+' with the layout mode, so it is positioned here rather than fixed in the XML.
+sub positionWatchedBadge()
+    poster = m.top.findNode("poster")
+    size = 30
+    x = poster.width - size - 6
+    y = 6
+    m.top.findNode("watchedBadge").translation = [x, y]
+    m.top.findNode("watchedCheck").translation = [x, y]
 end sub
 
 sub onPosterLoadStatus(event as object)

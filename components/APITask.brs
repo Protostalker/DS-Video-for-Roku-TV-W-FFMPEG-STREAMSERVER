@@ -3724,9 +3724,14 @@ sub init()
       ]
       additionals = [richAdditional, simpleAdditional, ""]
 
+      ' Try every API/version combination with the fullest "additional" (which carries
+      ' watched_ratio/file_watched) before ever falling back to a sparser one: some DSM
+      ' versions return zero episodes for one specific api/version combo yet would have
+      ' worked fine for another, and giving up on the rich fields too early is how the
+      ' episode grid ends up with no watched status even though Synology has it.
       best = emptyResult
-      for each attempt in attempts
-          for each additional in additionals
+      for each additional in additionals
+          for each attempt in attempts
               limit = "500"
               if attempt.idParam = "" then limit = "10000"
               params = "offset=0&limit=" + limit + "&sort_by=ep_num&sort_direction=asc"
@@ -3740,12 +3745,11 @@ sub init()
                   meta = parseEpisodeMetadata(result, key, id, showTitle)
                   parsed = parseEpisodes(result, key, id, showTitle)
                   source = attempt.api + "/" + attempt.version + "/" + attempt.idParam
-                  print "EPISODE_DIRECT title="; showTitle; " source="; source; " metadata="; meta.count(); " playable="; parsed.count()
+                  print "EPISODE_DIRECT title="; showTitle; " source="; source; " additional="; (additional <> ""); " metadata="; meta.count(); " playable="; parsed.count()
                   candidate = { episodes: parsed, metadata: meta, result: result, url: url, source: source }
                   if parsed.count() > best.episodes.count() then best = candidate
                   if best.episodes.count() = 0 and meta.count() > best.metadata.count() then best = candidate
                   if parsed.count() > 0 then return candidate
-                  if parsed.count() = 0 and meta.count() = 0 then exit for
               end if
               if best.url = "" then best = { episodes: [], metadata: [], result: result, url: url, source: "" }
           end for

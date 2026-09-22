@@ -537,6 +537,7 @@ def build_hls_command(opts: HlsOptions, url: str, media: MediaInfo, plan: Plan,
     """
     v = media.video
     seg = opts.segment_seconds
+    burn = plan.burn_index is not None and v is not None
     hw = bool(use_hw and opts.use_vaapi and plan.video_action == "encode"
               and not plan.tonemap and not plan.deinterlace and plan.burn_index is None)
 
@@ -544,6 +545,16 @@ def build_hls_command(opts: HlsOptions, url: str, media: MediaInfo, plan: Plan,
     if hw:
         cmd += ["-hwaccel", "vaapi", "-hwaccel_device", opts.vaapi_device,
                 "-hwaccel_output_format", "vaapi"]
+    if burn and v is not None and v.width and v.height:
+        # A bitmap subtitle stream (PGS/DVD) is turned into video frames by ffmpeg's
+        # "sub2video" bridge before it can be overlaid, and that bridge allocates its own
+        # canvas sized to the subtitle track's own metadata -- often a small, standard
+        # size (e.g. 720x576) that is smaller than the real video. A caption positioned
+        # low in the frame (as most are, and doubly so for a two-line one) then gets
+        # clipped to that canvas before the overlay filter ever runs, so scaling the
+        # already-clipped result afterwards cannot bring the missing line back. Telling
+        # ffmpeg the real video size up front avoids the clipping in the first place.
+        cmd += ["-canvas_size", "%dx%d" % (v.width, v.height)]
     cmd += ["-fflags", "+genpts"]
     cmd += http_input_options(url, opts)
     if start > 0:
@@ -551,7 +562,6 @@ def build_hls_command(opts: HlsOptions, url: str, media: MediaInfo, plan: Plan,
     cmd += ["-i", url]
 
     # ---- stream selection -------------------------------------------------
-    burn = plan.burn_index is not None and v is not None
     if v is not None and not burn:
         cmd += ["-map", "0:%d" % v.index]
     if plan.audio_index is not None and plan.audio_action != "none":
@@ -587,10 +597,14 @@ def build_hls_command(opts: HlsOptions, url: str, media: MediaInfo, plan: Plan,
                     chain.append("scale=%d:%d" % (new_w, new_h))
                 chain.append("format=yuv420p")
                 if burn:
-                    # Overlay the bitmap subtitle on the unscaled source first,
-                    # then run the normal chain (deinterlace/tonemap/scale/format).
+                    # A picture subtitle track (PGS/DVD) carries its own canvas size, which
+                    # is not always the video's actual frame size (common with re-muxed or
+                    # upscaled sources). Overlaying it 1:1 without matching that up can push
+                    # part of a multi-line subtitle below the visible frame. scale2ref fits
+                    # the subtitle image to the video's real size before compositing it.
                     sub_ref = "[0:s:%d]" % (burn_stream_pos or 0)
-                    fc = "[0:%d]%soverlay[ov];[ov]%s[v]" % (v.index, sub_ref, ",".join(chain))
+                    fc = ("%s[0:%d]scale2ref=w=iw2:h=ih2[subs][vref];"
+                          "[vref][subs]overlay[ov];[ov]%s[v]") % (sub_ref, v.index, ",".join(chain))
                     cmd += ["-filter_complex", fc, "-map", "[v]"]
                 else:
                     cmd += ["-vf", ",".join(chain)]

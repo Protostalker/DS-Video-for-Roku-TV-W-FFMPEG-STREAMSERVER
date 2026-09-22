@@ -97,6 +97,14 @@ sub init()
       return info
   end function
 
+  ' Trust Synology's own "watched" flag when it gives one; only fall back to the
+  ' percentage watched (Synology treats a file as done around 90%) if it did not.
+  function mediaIsWatched(fileWatchedValue as dynamic, ratioPercent as integer) as boolean
+      if fileWatchedValue = true then return true
+      if fileWatchedValue = false then return false
+      return ratioPercent >= 90
+  end function
+
   function fileInfoFromItem(item as object) as object
       info = { id: invalid, path: "", watched: invalid }
 
@@ -536,6 +544,11 @@ sub init()
                   node.SDPosterUrl = poster
               end if
           end if
+          if category = "movies" or category = "homevideos" or category = "tvrecordings"
+              fileInfo = fileInfoFromItem(item)
+              ratio = numberForDetail(item, ["watched_ratio", "watchedRatio"])
+              node.addFields({ watched: mediaIsWatched(fileInfo.watched, ratio) })
+          end if
           idx = idx + 1
       end for
 
@@ -618,6 +631,9 @@ sub init()
       if node.title = "" then node.title = "Untitled"
       node.description = playlistItemMeta(item)
       node.addFields({ layoutMode: layoutMode, playlistIndex: idx })
+      fileInfo = fileInfoFromItem(item)
+      ratio = numberForDetail(item, ["watched_ratio", "watchedRatio"])
+      node.addFields({ watched: mediaIsWatched(fileInfo.watched, ratio) })
       if layoutMode = "playlistWide" or layoutMode = "playlistHomeVideo"
           dateText = playlistItemDate(item)
           if dateText <> "" then node.addFields({ playlistDate: dateText })

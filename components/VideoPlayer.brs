@@ -812,7 +812,12 @@ sub init()
       if key = "" then return
       playbackPos = effectivePlaybackPosition()
       if playbackPos < 30 then return
-      duration = int(m.videoNode.duration)
+      ' Compare against the whole video's length, not the Roku node's own "duration" field:
+      ' for a stream-server HLS stream that field is the length of just the growing playlist
+      ' (or, after a resume, of what is left from the resume point), not the full video. Using
+      ' it directly here made a resumed episode look "almost finished" within moments of
+      ' resuming, clearing the resume point and marking it watched.
+      duration = totalDurationSeconds()
       if duration > 0 and playbackPos > duration - 90
           finishPlaybackPosition()
           return
@@ -856,7 +861,7 @@ sub init()
               reg.flush()
           end if
       end if
-      duration = int(m.videoNode.duration)
+      duration = totalDurationSeconds()
       position = effectivePlaybackPosition()
       if duration > 0 then position = duration
       if position < 1 then position = 1
@@ -1333,12 +1338,18 @@ sub init()
   sub closeTrackMenu()
       m.top.findNode("trackMenu").visible = false
       m.menuOpen = false
+      ' Explicitly let go of the list's focus first: a hidden node can otherwise keep it,
+      ' which would let stray OK presses on this remote node be replayed as a fresh pick.
+      m.top.findNode("trackList").setFocus(false)
       m.top.setFocus(true)
       ensureVideoFocus()
       showPlaybackOverlay()
   end sub
 
   sub onTrackSelected(event as object)
+      ' Ignore a selection event that arrives after the menu is already closed (a stray
+      ' repeat, or one queued right as we closed it), so it can't be replayed as a new pick.
+      if m.menuOpen <> true then return
       idx = event.getData()
       if idx = invalid or idx < 0 or idx >= m.menuActions.count() then return
       action = m.menuActions[idx]

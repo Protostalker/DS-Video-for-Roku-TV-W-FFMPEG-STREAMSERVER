@@ -47,6 +47,14 @@ sub init()
       return ""
   end function
 
+  ' Trust Synology's own "watched" flag when it gives one; only fall back to the
+  ' percentage watched (Synology treats a file as done around 90%) if it did not.
+  function episodeIsWatched(fileWatchedValue as dynamic, ratioPercent as integer) as boolean
+      if fileWatchedValue = true then return true
+      if fileWatchedValue = false then return false
+      return ratioPercent >= 90
+  end function
+
   function fileInfoFromItem(item as object) as object
       info = { id: invalid, path: "", watched: invalid }
 
@@ -175,6 +183,7 @@ sub init()
       showTitle = safeStr(m.top.showData, ["title", "name"])
       m.top.findNode("showTitle").text = showTitle
       idx = 0
+      watchedCount = 0
       totalSeasonEpisodes = seasonEpisodeCount(season)
 
       for each ep in episodes
@@ -224,9 +233,15 @@ sub init()
               preventWrapUp: preventUp,
               preventWrapDown: preventDown
           })
+          fileInfo = fileInfoFromItem(ep)
+          ratio = firstNumber(ep, ["watched_ratio", "watchedRatio"])
+          watchedNow = episodeIsWatched(fileInfo.watched, ratio)
+          node.addFields({ watched: watchedNow })
+          if watchedNow then watchedCount = watchedCount + 1
           idx = idx + 1
           end if
       end for
+      print "EPISODE_WATCHED_STATE season="; season; " episodes="; idx; " watched="; watchedCount
 
       grid.content = content
       grid.visible = true

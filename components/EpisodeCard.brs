@@ -33,6 +33,10 @@ sub onContentSet(event as object)
     else
         poster.visible = false
     end if
+
+    watched = content.watched = true
+    m.top.findNode("watchedBadge").visible = watched
+    m.top.findNode("watchedCheck").visible = watched
 end sub
 
 sub onPosterLoadStatus(event as object)
