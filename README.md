@@ -92,16 +92,7 @@ The server starts again by itself after a NAS reboot.
 1. **Turn on developer mode.** With the Roku remote press: Home three times, Up twice,
    Right, Left, Right, Left, Right. Note the IP address it shows, accept the agreement, set
    a developer password and let the Roku restart.
-2. **Build the channel zip.** From the repository folder on your computer, zip these four
-   items together: the `manifest` file and the `source`, `components` and `images` folders.
-   The zip must have `manifest` at its top level, not inside another folder. On Mac or
-   Linux, run this in the repository folder:
-
-   ```sh
-   zip -r roku-ds-video.zip manifest source components images -x '*.DS_Store'
-   ```
-
-   On Windows, select those four items, right-click, Send to, Compressed (zipped) folder.
+2. **Identify the Zip** Find the zip file in the repo, and remember where you saved it lol (should be `roku-ds-video-x.x.x`)
 3. **Upload it.** In a browser go to `http://<ROKU_IP>/`, sign in as user `rokudev` with
    your developer password, click **Upload**, choose the zip, then **Install**. The channel
    starts on its own. Later, it is in your channel list as **Synology DS Video**.
